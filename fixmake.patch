@@ -1,0 +1,13 @@
+diff --git a/src/Makefile b/src/Makefile
+index c7fdf21..7889c72 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -188,7 +188,7 @@ $(REDIS_CHECK_AOF_NAME): $(REDIS_CHECK_AOF_OBJ)
+ # building it should complete before building any other object. Instead of
+ # depending on a single artifact, build all dependencies first.
+ %.o: %.c .make-prerequisites
+-	$(REDIS_CC) -c $<
++	$(REDIS_CC) -c $< -o $@
+ 
+ clean:
+ 	rm -rf $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_DUMP_NAME) $(REDIS_CHECK_AOF_NAME) *.o *.gcda *.gcno *.gcov redis.info lcov-html
