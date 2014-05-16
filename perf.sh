@@ -57,7 +57,7 @@ else
 fi
 
 cd redis/src
-VERSIONS=$(git tag|grep "^2\\.[68]")
+VERSIONS=$(git tag|egrep "^2\\.[68]|^3")
 set +e  # disable die-on-error
 
 for version in $VERSIONS; do
