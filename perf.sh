@@ -1,8 +1,30 @@
 #!/bin/bash -x
 
+NAMESPACE_CPUS=$1
+if [[ $NAMESPACE_CPUS == "a" ]]; then
+    REDIS_PORT=4444
+    NAMESPACE=a
+    REV=''
+    CPU0=0
+    CPU1=1
+elif [[ $NAMESPACE_CPUS == "b" ]]; then
+    REDIS_PORT=4445
+    NAMESPACE=b
+    REV='r'
+    CPU0=2
+    CPU1=3
+else
+    echo "Must launch with 'a' or 'b' as an argument."
+    echo "Argument 'a' binds to CPUs 0,1 and processes tags in ascending order."
+    echo "Argument 'b' binds to CPUs 2,3 and processes tags in reverse order."
+    exit 1
+fi
+
+echo $(date) >> runcount-$NAMESPACE
+
 COUNT=120000
-BENCH_NORMAL="../../redis-latest/src/redis-benchmark -n $COUNT --csv"
-BENCH_DATA="$BENCH_NORMAL -r 32 -d 64"
+BENCH_NORMAL="../../redis-latest/src/redis-benchmark -n $COUNT --csv -p $REDIS_PORT"
+BENCH_DATA="$BENCH_NORMAL -r 9999999999 -d 64"
 BENCH_PIPE="$BENCH_DATA -P 1000"
 if hash timeout 2>/dev/null; then
     TIMEOUT="timeout 300"
@@ -22,8 +44,9 @@ PIN_TO_CPU=true
 if $PIN_TO_CPU; then
     if hash taskset 2>/dev/null; then
         TASKSET=taskset
-        TASKSET_BENCH="$TASKSET -c 0"
-        TASKSET_REDIS="$TASKSET -c 1"
+        TASKSET_BENCH="$TASKSET -c $CPU0"
+        TASKSET_REDIS="$TASKSET -c $CPU1"
+        TASKSET_BOTH="$TASKSET -c $CPU0,$CPU1"
     fi
 fi
 
@@ -31,33 +54,33 @@ fi
 cd "$BASE"
 
 # Set up the redis-server we'll use
-if [[ -e redis/ ]]; then
-    pushd redis
+if [[ -e redis$NAMESPACE/ ]]; then
+    pushd redis$NAMESPACE
     git reset --hard HEAD
     git clean -dfx
     git checkout unstable
-    git pull
+    git pull --force
     popd
 else
-    git clone https://github.com/antirez/redis
+    git clone https://github.com/antirez/redis redis$NAMESPACE
 fi
 
 # Set up the redis-benchmark we'll use
 if [[ -e redis-latest/ ]]; then
     pushd redis-latest/src
     git checkout unstable
-    git pull
-    make -j
+    git pull --force
+    $TASKSET_BOTH make -j
     popd
 else
-    git clone redis redis-latest
+    git clone redis$NAMESPACE redis-latest
     pushd redis-latest/src
-    make -j
+    $TASKSET_BOTH make -j
     popd
 fi
 
-cd redis/src
-VERSIONS=$(git tag|egrep "^2\\.[68]|^3")
+cd redis$NAMESPACE/src
+VERSIONS=$(git tag|egrep "^2\\.[68]|^3"|sort -n$REV|grep -v alpha)
 set +e  # disable die-on-error
 
 for version in $VERSIONS; do
@@ -96,7 +119,7 @@ for version in $VERSIONS; do
                     fi
                     echo "Date:$USE_DATE" >> "$BASE/meta-$e"
                 done
-                make distclean
+                $TASKSET_BOTH make distclean
                 git checkout Makefile
                 unset REDIS_CFLAGS
                 unset REDIS_LDFLAGS
@@ -116,26 +139,32 @@ for version in $VERSIONS; do
                 fi
                 # Try to compile deps with lto too?
                 # export CFLAGS=$REDIS_CFLAGS
-                make -j V=1
+                $TASKSET_BOTH make -j V=1
                 if [[ $? != 0 ]]; then
-                    echo "SKIPPING $version due to bad compile" > "$BASE/skip-$ExT1"
+                    echo "SKIPPING $version due to bad compile" >> "$BASE/skip-$EXT1"
+                    continue
                 fi
-                RPID="$BASE/pidf"
+                RPID="$BASE/pidf-$NAMESPACE"
                 RWHERE=". ./obj.x86_64"
                 for where in $RWHERE; do
                     if [[ -f "$where"/redis-server ]]; then
-                        $TASKSET_REDIS "$where"/redis-server --daemonize yes --save "\"\"" --pidfile "$RPID"
+                        $TASKSET_REDIS "$where"/redis-server --daemonize yes --save "\"\"" --pidfile "$RPID" --port $REDIS_PORT
                         break;
                     fi
                 done
-                if [[ ! -f "$RPID" ]]; then
-                    sleep 2  # daemon starts before init, so give time to listen
-                fi
+                sleepCounter=0
+                while [[ ! -f "$RPID" ]]; do
+                    if [[ $(( sleepCounter++ )) -gt 20 ]]; then
+                        echo "Skipping version $version because no PID appeared." >> "$BASE/skip-$EXT1"
+                        continue 2  # continue up a level, not continue checking for pid
+                    fi
+                    sleep 0.3  # daemon starts before init, so give time to listen
+                done
                 REDIS_PID=$(cat "$RPID")
-                echo "Testing normal $version $compiler $flags..."
-                time $TASKSET_BENCH $TIMEOUT $BENCH_NORMAL > "$BASE/regular-$EXT1"
-                time $TASKSET_BENCH $TIMEOUT $BENCH_NORMAL > "$BASE/regular-$EXT2"
-                time $TASKSET_BENCH $TIMEOUT $BENCH_NORMAL > "$BASE/regular-$EXT3"
+#                echo "Testing normal $version $compiler $flags..."
+#                time $TASKSET_BENCH $TIMEOUT $BENCH_NORMAL > "$BASE/regular-$EXT1"
+#                time $TASKSET_BENCH $TIMEOUT $BENCH_NORMAL > "$BASE/regular-$EXT2"
+#                time $TASKSET_BENCH $TIMEOUT $BENCH_NORMAL > "$BASE/regular-$EXT3"
                 echo "Testing data $version $compiler $flags..."
                 time $TASKSET_BENCH $TIMEOUT $BENCH_DATA > "$BASE/data-$EXT1"
                 time $TASKSET_BENCH $TIMEOUT $BENCH_DATA > "$BASE/data-$EXT2"
@@ -144,8 +173,9 @@ for version in $VERSIONS; do
                 time $TASKSET_BENCH $TIMEOUT $BENCH_PIPE > "$BASE/pipe-$EXT1"
                 time $TASKSET_BENCH $TIMEOUT $BENCH_PIPE > "$BASE/pipe-$EXT2"
                 time $TASKSET_BENCH $TIMEOUT $BENCH_PIPE > "$BASE/pipe-$EXT3"
-#                kill -9 "$REDIS_PID" || echo "Redis already dead?"
-                pkill -9 redis-server
+                kill -9 "$REDIS_PID" || echo "Redis already dead?"
+                rm -f "$RPID"
+#                pkill -9 redis-server
             done
         done
     done
